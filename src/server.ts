@@ -1,77 +1,80 @@
-import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
-
-type Room = {
-  [uid: string]: WebSocket;
-};
-
-const rooms: Record<string, Room> = {};
+import WebSocket, { WebSocketServer } from 'ws';
+import { handleMessage } from './handlers';
+import { createContext, ClientContext } from './context';
 
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
 
-// 🔁 Mantém conexões vivas com ping a cada 30 segundos (PING-PONG)
+const rooms: Record<string, Record<string, WebSocket>> = {};
+const wsContextMap = new WeakMap<WebSocket, ClientContext>();
+
+const PING_INTERVAL = 30000;  // Intervalo de ping em ms
+const MAX_PING_ATTEMPTS = 3; // Tentativas antes de desconectar
+const INACTIVITY_TIMEOUT = 10000; // 10 segundos
+
 setInterval(() => {
+  const now = Date.now();
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.ping();
+    const ctx = wsContextMap.get(client);
+    if (!ctx) return;
+
+    // ❌ Desconecta por inatividade de jogo (sem enviar posição)
+    if (now - (ctx.lastActiveAt || 0) > INACTIVITY_TIMEOUT) {
+      console.log(`❌ [${ctx.uid}] Desconectando por inatividade (sem enviar posição). Último ativo: ${ctx.lastActiveAt}, agora: ${now}`);
+      return client.terminate();
     }
+
+    // ✅ Verifica o ping/pong
+    if (!ctx.isAlive) {
+      ctx.pingAttempts = (ctx.pingAttempts || 0) + 1;
+      if (ctx.pingAttempts >= MAX_PING_ATTEMPTS) {
+        console.log(`⚠️ Cliente ${ctx.uid} desconectado por falha no ping/pong`);
+        return client.terminate();
+      }
+    } else {
+      ctx.pingAttempts = 0;
+    }
+
+    ctx.isAlive = false;
+    client.ping();
   });
-}, 30000); // 30 segundos
+}, PING_INTERVAL);
 
 wss.on('connection', (ws) => {
-  let currentRoom = '';
-  let uid = '';
+  const ctx = createContext(ws, rooms);
+  wsContextMap.set(ws, ctx);
+
+  ws.on('pong', () => {
+    const current = wsContextMap.get(ws);
+    if (current) {
+      current.isAlive = true;
+      current.pingAttempts = 0;
+    }
+  });
 
   ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message.toString());
-
-      if (data.type === 'join') {
-        currentRoom = data.room;
-        uid = data.uid;
-
-        if (!rooms[currentRoom]) rooms[currentRoom] = {};
-        rooms[currentRoom][uid] = ws;
-
-        console.log(`✅ Jogador ${uid} entrou na sala ${currentRoom}`);;
-        return;
-      }
-
-      if (data.type === 'position' && currentRoom && uid) {
-        const { x, y } = data;
-
-        //console.log(`📍 Posição recebida de ${uid} na sala ${currentRoom}: (${x}, ${y})`);
-
-        const payload = JSON.stringify({
-          type: 'position',
-          uid,
-          x,
-          y
-        });
-
-        Object.entries(rooms[currentRoom]).forEach(([playerId, socket]) => {
-          if (playerId !== uid) {
-            socket.send(payload);
-          }
-        });
-      }
-    } catch (err) {
-      console.error('Invalid message', err);
-    }
+    ctx.lastActiveAt = Date.now();
+    handleMessage(message.toString(), ctx);
   });
 
   ws.on('close', () => {
-    console.log(`🔌 Conexão fechada: ${uid} da sala ${currentRoom}`);
+    console.log(`🔌 Conexão fechada: ${ctx.uid} da sala ${ctx.room}`);
 
-    if (currentRoom && uid && rooms[currentRoom]) {
-      delete rooms[currentRoom][uid];
-      if (Object.keys(rooms[currentRoom]).length === 0) {
-        delete rooms[currentRoom];
-        console.log(`🧹 Sala ${currentRoom} removida por estar vazia`);
+    if (ctx.room && ctx.uid && ctx.rooms[ctx.room]) {
+      delete ctx.rooms[ctx.room][ctx.uid];
+      if (Object.keys(ctx.rooms[ctx.room]).length === 0) {
+        delete ctx.rooms[ctx.room];
+        console.log(`🧹 Sala ${ctx.room} removida por estar vazia`);
       }
     }
+
+    wsContextMap.delete(ws);
   });
+
+  ws.on('error', (err) => {
+    console.warn(`Erro no WebSocket do cliente ${ctx.uid}:`, err.message);
+  });  
 });
 
 const port = process.env.PORT || 8080;
