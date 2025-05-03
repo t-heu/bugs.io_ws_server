@@ -1,7 +1,12 @@
 import http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
+
+import { PING_INTERVAL } from './config/constants';
 import { handleMessage } from './handlers';
-import { createContext, ClientContext } from './context';
+import { createContext, ClientContext } from './ws/context';
+import { checkInactivity } from './ws/inactivity';
+import { checkPing } from './ws/ping';
+import { checkRateLimit } from './ws/rateLimit';
 
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
@@ -9,41 +14,46 @@ const wss = new WebSocketServer({ server });
 const rooms: Record<string, Record<string, WebSocket>> = {};
 const wsContextMap = new WeakMap<WebSocket, ClientContext>();
 
-const PING_INTERVAL = 30000;  // Intervalo de ping em ms
-const MAX_PING_ATTEMPTS = 3; // Tentativas antes de desconectar
-const INACTIVITY_TIMEOUT = 10000; // 10 segundos
-
+// Função principal do setInterval
 setInterval(() => {
   const now = Date.now();
   wss.clients.forEach((client) => {
     const ctx = wsContextMap.get(client);
     if (!ctx) return;
 
-    // ❌ Desconecta por inatividade de jogo (sem enviar posição)
-    if (now - (ctx.lastActiveAt || 0) > INACTIVITY_TIMEOUT) {
-      console.log(`❌ [${ctx.uid}] Desconectando por inatividade (sem enviar posição). Último ativo: ${ctx.lastActiveAt}, agora: ${now}`);
-      return client.terminate();
-    }
+    // Verifica a inatividade
+    if (checkInactivity(client, ctx, now)) return;
 
-    // ✅ Verifica o ping/pong
-    if (!ctx.isAlive) {
-      ctx.pingAttempts = (ctx.pingAttempts || 0) + 1;
-      if (ctx.pingAttempts >= MAX_PING_ATTEMPTS) {
-        console.log(`⚠️ Cliente ${ctx.uid} desconectado por falha no ping/pong`);
-        return client.terminate();
-      }
-    } else {
-      ctx.pingAttempts = 0;
-    }
+    // Verifica o ping/pong
+    if (checkPing(client, ctx)) return;
 
+    // Reseta o status de isAlive e envia o ping
     ctx.isAlive = false;
     client.ping();
   });
 }, PING_INTERVAL);
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   const ctx = createContext(ws, rooms);
+  // CORS
+  const origin = req.headers.origin;
+
+  if (!origin) return ws.terminate();
+
+  const allowedOrigins = ['https://bugs-io.onrender.com', 'http://localhost:3000'];
+
+  if (!allowedOrigins.includes(origin)) {
+    ctx.log({
+      type: 'DISCONNECT',
+      uid: ctx.uid,
+      room: ctx.room,
+      msg: `Conexão rejeitada por origem não permitida: ${origin}`
+    });    
+    return ws.terminate();
+  }
+
   wsContextMap.set(ws, ctx);
+  ctx.lastMessageAt = ctx.lastMessageAt || 0;
 
   ws.on('pong', () => {
     const current = wsContextMap.get(ws);
@@ -54,18 +64,28 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('message', (message) => {
-    ctx.lastActiveAt = Date.now();
+    const now = Date.now();
+    ctx.lastActiveAt = now;
+
+    const { terminate } = checkRateLimit(ctx, message.toString(), now);
+    if (terminate) {
+      ws.terminate();
+      return;
+    }
+
+    ctx.lastMessageAt = now;
+
     handleMessage(message.toString(), ctx);
   });
 
   ws.on('close', () => {
-    console.log(`🔌 Conexão fechada: ${ctx.uid} da sala ${ctx.room}`);
+    ctx.log({ type: 'DISCONNECT', uid: ctx.uid, room: ctx.room, msg: 'Conexão fechada' });
 
     if (ctx.room && ctx.uid && ctx.rooms[ctx.room]) {
       delete ctx.rooms[ctx.room][ctx.uid];
       if (Object.keys(ctx.rooms[ctx.room]).length === 0) {
         delete ctx.rooms[ctx.room];
-        console.log(`🧹 Sala ${ctx.room} removida por estar vazia`);
+        ctx.log({ type: 'INFO', room: ctx.room, msg: 'Sala removida por estar vazia' });
       }
     }
 
@@ -73,11 +93,39 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('error', (err) => {
-    console.warn(`Erro no WebSocket do cliente ${ctx.uid}:`, err.message);
+    ctx.log({ type: 'ERROR', uid: ctx.uid, msg: 'Erro no WebSocket', error: err });
   });  
 });
 
 const port = process.env.PORT || 8080;
 server.listen(port, () => {
-  console.log(`WebSocket server listening on ws://localhost:${port}`);
+  console.log(`WebSocket server listening on ${port}`);
 });
+/*
+const playerData = {
+  name,
+  uid: nextPlayer,
+  killer: '',
+  position: {
+    x: ARENA_SIZE / 2,
+    y: ARENA_SIZE / 2,
+  },
+  size: 30,
+  score: scoreCurrent,
+  stats: {
+    speed: character.stats.speed * 0.5,
+    attack: character.stats.attack,
+    health: character.stats.health,
+    maxHealth: character.stats.health,
+  },
+  effects: {
+    invincible: '',
+    speedBoost: '',
+    poisonedUntil: '',
+    specialAttack: '',
+    slow: ''
+  },
+  poisonNextAttack: false,
+  type: character.id,
+  ability: character.ability || null
+};*/

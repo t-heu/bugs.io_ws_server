@@ -1,9 +1,22 @@
-import { ClientContext } from '../context';
+import { ClientContext } from '../ws/context';
 
-export function handlePosition(data: any, ctx: ClientContext) {
+export const ARENA_SIZE = 2000
+
+type PositionMessage = {
+  type: 'position';
+  x: number;
+  y: number;
+};
+
+export function handlePosition(data: PositionMessage, ctx: ClientContext) {
   const { x, y } = data;
 
   if (!ctx.room || !ctx.uid) return;
+
+  if (
+    typeof data.x !== 'number' || typeof data.y !== 'number' ||
+    data.x < 0 || data.x > ARENA_SIZE || data.y < 0 || data.y > ARENA_SIZE
+  ) return;
 
   const payload = JSON.stringify({
     type: 'position',

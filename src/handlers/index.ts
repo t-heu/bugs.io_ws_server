@@ -1,6 +1,6 @@
 import { handleJoin } from './join';
 import { handlePosition } from './position';
-import { ClientContext } from '../context';
+import { ClientContext } from '../ws/context';
 
 const handlers: Record<string, (data: any, ctx: ClientContext) => void> = {
   join: handleJoin,

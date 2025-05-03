@@ -1,4 +1,4 @@
-import { ClientContext } from '../context';
+import { ClientContext } from '../ws/context';
 
 export function handleJoin(data: any, ctx: ClientContext) {
   const { uid, room } = data;
@@ -22,5 +22,10 @@ export function handleJoin(data: any, ctx: ClientContext) {
   if (!ctx.rooms[room]) ctx.rooms[room] = {};
   ctx.rooms[room][uid] = ctx.ws;
 
-  ctx.log(`✅ Jogador ${uid} entrou na sala ${room}`);
+  ctx.log({
+    type: 'JOIN',
+    uid,
+    room,
+    msg: `Jogador entrou na sala.`,
+  });  
 }
